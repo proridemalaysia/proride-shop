@@ -1,25 +1,26 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ShoppingCart, Truck, CreditCard, Check, X, Loader2, Package, Ship, Plane, Printer, ExternalLink, AlertCircle, Database, AlertTriangle, Lock, LogIn, Save, RefreshCw, Gift, Ticket, Calendar, Trash2 } from 'lucide-react';
+import { ShoppingCart, Check, X, Loader2, Package, AlertCircle, Database, Lock, LogIn, Save, RefreshCw, Gift, Trash2, UploadCloud } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
-import { products, models, images } from './data';
+// We import data only for the initial seeding process. 
+// Once seeded, the app relies on Supabase.
+import { products as initialProducts, models as initialModels, images as initialImages } from './data';
 
-// --- Configuration (Environment Variables) ---
+// --- Configuration ---
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 const TOYYIB_SECRET = import.meta.env.VITE_TOYYIB_SECRET || '';
 const TOYYIB_CODE = import.meta.env.VITE_TOYYIB_CODE || '';
 
 // --- Types ---
-
 interface Product {
   CODE: string;
   MODEL: string;
   VARIANT: string;
   POSITION: string;
-  QUANTITY: number;
   PRICE: number;
+  QUANTITY?: number; // Used for stock display
 }
 
 interface CartItem extends Product {
@@ -52,18 +53,9 @@ interface Voucher {
 
 interface OrderReceipt {
   billCode: string;
-  transactionId: string;
-  amount: number;
-  date: string;
   items: CartItem[];
-  customer: CustomerDetails;
-  shipping: {
-    courier: string;
-    cost: number;
-    type: string;
-  };
+  amount: number;
   discount: number;
-  voucherCode?: string;
   gifts: string[];
 }
 
@@ -100,6 +92,12 @@ const SHIRT_SIZES = ['S', 'M', 'L', 'XL', 'XXL'];
 // --- Components ---
 
 const App = () => {
+  // --- Data State (Fetched from Supabase) ---
+  const [dbProducts, setDbProducts] = useState<Product[]>([]);
+  const [dbModels, setDbModels] = useState<string[]>([]);
+  const [dbImages, setDbImages] = useState<Record<string, string>>({});
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
+
   // State: Selection
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [selectedVariant, setSelectedVariant] = useState<string>('');
@@ -113,9 +111,10 @@ const App = () => {
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [adminPass, setAdminPass] = useState('');
   const [editingStock, setEditingStock] = useState<Record<string, number>>({});
-  const [adminTab, setAdminTab] = useState<'stock' | 'vouchers' | 'gifts'>('stock');
+  const [adminTab, setAdminTab] = useState<'stock' | 'vouchers' | 'gifts' | 'settings'>('stock');
   const [adminVouchers, setAdminVouchers] = useState<Voucher[]>([]);
   const [newVoucher, setNewVoucher] = useState({ code: '', amount: '', from: '', to: '' });
+  const [isSeeding, setIsSeeding] = useState(false);
 
   // State: Cart & UI
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -150,25 +149,65 @@ const App = () => {
 
   // --- Effects ---
 
-  // Fetch Real Stock on Mount
+  // Initial Fetch: Catalog & Stock
   useEffect(() => {
-    fetchStock();
+    if (supabase) {
+      fetchCatalog();
+      fetchStock();
+    }
   }, [supabase]);
+
+  // Fetch product definitions from Supabase (Secure from GitHub)
+  const fetchCatalog = async () => {
+    if (!supabase) return;
+    try {
+        const [prodRes, imgRes, modelRes] = await Promise.all([
+            supabase.from('product_catalog').select('*'),
+            supabase.from('product_images').select('*'),
+            supabase.from('car_models').select('*')
+        ]);
+
+        if (prodRes.data && prodRes.data.length > 0) {
+            setDbProducts(prodRes.data.map((p: any) => ({
+                CODE: p.code,
+                MODEL: p.model,
+                VARIANT: p.variant,
+                POSITION: p.position,
+                PRICE: p.price
+            })));
+        } else {
+            // Fallback if DB is empty so site isn't broken before seeding
+            setDbProducts(initialProducts.map(p => ({...p, PRICE: p.PRICE, QUANTITY: 0})));
+        }
+
+        if (imgRes.data && imgRes.data.length > 0) {
+            const imgMap: Record<string, string> = {};
+            imgRes.data.forEach((i: any) => imgMap[i.model_variant_key] = i.url);
+            setDbImages(imgMap);
+        } else {
+            setDbImages(initialImages);
+        }
+
+        if (modelRes.data && modelRes.data.length > 0) {
+           setDbModels(modelRes.data.map((m: any) => m.name));
+        } else {
+           setDbModels(Object.keys(initialModels));
+        }
+
+        setIsDataLoaded(true);
+
+    } catch (e) {
+        console.error("Catalog Load Error", e);
+    }
+  };
 
   const fetchStock = async () => {
     if (!supabase) return;
     setIsLoadingStock(true);
-    
-    // Fetch all stock including gifts
     const { data, error } = await supabase.from('inventory').select('*');
-    
-    if (error) {
-        console.error("Error fetching stock:", error);
-    } else if (data) {
+    if (data) {
         const levels: Record<string, number> = {};
-        data.forEach((item: any) => {
-            levels[item.product_code] = item.quantity;
-        });
+        data.forEach((item: any) => levels[item.product_code] = item.quantity);
         setStockLevels(levels);
     }
     setIsLoadingStock(false);
@@ -181,23 +220,20 @@ const App = () => {
   };
 
   useEffect(() => {
-      if (isAdmin && adminTab === 'vouchers') {
-          fetchVouchers();
-      }
+      if (isAdmin && adminTab === 'vouchers') fetchVouchers();
   }, [isAdmin, adminTab]);
 
   // --- Computed Data ---
-  const modelList = useMemo(() => Object.keys(models), []);
   const availableVariants = useMemo(() => {
     if (!selectedModel) return [];
-    const modelProducts = products.filter(p => p.MODEL === selectedModel);
+    const modelProducts = dbProducts.filter(p => p.MODEL === selectedModel);
     return Array.from(new Set(modelProducts.map(p => p.VARIANT)));
-  }, [selectedModel]);
+  }, [selectedModel, dbProducts]);
 
   const displayedProducts = useMemo(() => {
     if (!selectedModel || !selectedVariant) return [];
-    return products.filter(p => p.MODEL === selectedModel && p.VARIANT === selectedVariant);
-  }, [selectedModel, selectedVariant]);
+    return dbProducts.filter(p => p.MODEL === selectedModel && p.VARIANT === selectedVariant);
+  }, [selectedModel, selectedVariant, dbProducts]);
 
   const currentImage = useMemo(() => {
     if (!selectedModel || !selectedVariant) return null;
@@ -207,21 +243,20 @@ const App = () => {
     else if (selectedVariant === 'PERFORMANCE') variantSuffix = 'Performance Absorber';
     else if (selectedVariant === 'SPORT SPRING') variantSuffix = 'Sport Spring';
     const key = `${selectedModel}-${variantSuffix}`;
-    return images[key as keyof typeof images] || 'https://placehold.co/600x400?text=No+Image';
-  }, [selectedModel, selectedVariant]);
+    return dbImages[key] || 'https://placehold.co/600x400?text=No+Image';
+  }, [selectedModel, selectedVariant, dbImages]);
 
   const variantStyles = useMemo(() => getVariantStyles(selectedVariant), [selectedVariant]);
   const subtotal = cart.reduce((sum, item) => sum + item.PRICE, 0);
   const totalWeight = cart.reduce((sum, item) => sum + getProductWeight(item), 0);
   
-  // Logic: 1Set (Absorber Set) OR Sport Spring (which is also 1Set in data) triggers T-Shirt
   const hasShirtGift = useMemo(() => {
       return cart.some(item => item.POSITION === '1SET');
   }, [cart]);
 
   const finalTotal = Math.max(0, subtotal + (selectedCourier ? selectedCourier.price : 0) - (appliedVoucher?.amount || 0));
 
-  // --- Admin Handlers ---
+  // --- Admin Actions ---
   const handleAdminLogin = (e: React.FormEvent) => {
     e.preventDefault();
     if (adminPass === 'admin123') {
@@ -232,8 +267,49 @@ const App = () => {
     }
   };
 
+  // Seeding Function: Migrates data.ts to Supabase
+  const seedDatabase = async () => {
+      if (!supabase || !confirm("This will overwrite/fill the database with initial data. Continue?")) return;
+      setIsSeeding(true);
+      try {
+          // 1. Seed Models
+          for (const [model, make] of Object.entries(initialModels)) {
+              await supabase.from('car_models').upsert({ name: model, make }, { onConflict: 'name' });
+          }
+          // 2. Seed Images
+          for (const [key, url] of Object.entries(initialImages)) {
+              await supabase.from('product_images').upsert({ model_variant_key: key, url }, { onConflict: 'model_variant_key' });
+          }
+          // 3. Seed Products (Catalog + Inventory)
+          for (const p of initialProducts) {
+              // Catalog
+              await supabase.from('product_catalog').upsert({
+                  code: p.CODE,
+                  model: p.MODEL,
+                  variant: p.VARIANT,
+                  position: p.POSITION,
+                  price: p.PRICE
+              }, { onConflict: 'code' });
+              
+              // Inventory (Only if not exists to preserve current stock)
+              const { data } = await supabase.from('inventory').select('product_code').eq('product_code', p.CODE).single();
+              if (!data) {
+                 await supabase.from('inventory').insert({ product_code: p.CODE, quantity: p.QUANTITY });
+              }
+          }
+          alert("Database seeded successfully!");
+          fetchCatalog();
+          fetchStock();
+      } catch (e: any) {
+          alert("Seeding failed: " + e.message);
+      } finally {
+          setIsSeeding(false);
+      }
+  };
+
   const updateStock = async (code: string, newQty: number) => {
     if (!supabase) return alert("Database not connected");
+    // Admins can use direct upsert, or we can use an RPC if we want strict logging
     const { error } = await supabase
         .from('inventory')
         .upsert({ product_code: code, quantity: newQty }, { onConflict: 'product_code' });
@@ -252,14 +328,12 @@ const App = () => {
   const createVoucher = async () => {
       if (!supabase) return;
       if (!newVoucher.code || !newVoucher.amount || !newVoucher.from || !newVoucher.to) return alert("Fill all fields");
-      
       const { error } = await supabase.from('vouchers').insert([{
           code: newVoucher.code.toUpperCase(),
           amount: parseFloat(newVoucher.amount),
           valid_from: new Date(newVoucher.from).toISOString(),
           valid_to: new Date(newVoucher.to).toISOString()
       }]);
-      
       if (error) alert(error.message);
       else {
           setNewVoucher({ code: '', amount: '', from: '', to: '' });
@@ -274,7 +348,6 @@ const App = () => {
   };
 
   // --- Shop Handlers ---
-
   const addToCart = (product: Product) => {
     const currentStock = stockLevels[product.CODE] ?? 0;
     const inCart = cart.filter(c => c.CODE === product.CODE).length;
@@ -301,52 +374,42 @@ const App = () => {
       setVoucherMsg('');
       if (!voucherInput.trim()) return;
       if (!supabase) return setVoucherMsg("System offline");
-
-      // Check voucher
       const { data, error } = await supabase
           .from('vouchers')
           .select('*')
           .eq('code', voucherInput.toUpperCase())
           .eq('is_active', true)
           .single();
-
       if (error || !data) {
           setVoucherMsg("Invalid voucher code");
           setAppliedVoucher(null);
           return;
       }
-
       const now = new Date();
       const validFrom = new Date(data.valid_from);
       const validTo = new Date(data.valid_to);
-
       if (now < validFrom || now > validTo) {
-          setVoucherMsg("Voucher expired or not yet valid");
+          setVoucherMsg("Voucher expired");
           setAppliedVoucher(null);
           return;
       }
-
       setAppliedVoucher({ code: data.code, amount: data.amount });
       setVoucherMsg(`Voucher applied! -RM${data.amount}`);
   };
 
-  // --- Payment & Shipping Logic ---
-
+  // --- Shipping & Payment ---
   const calculateShipping = async () => {
     if (!customer.postcode || customer.postcode.length !== 5) {
       setErrorMsg("Please enter a valid 5-digit postcode.");
       return;
     }
     if (cart.length === 0) return;
-
     setIsCalculatingShipping(true);
     setErrorMsg('');
-    
     try {
-      await new Promise(r => setTimeout(r, 800)); // Simulate API delay
+      await new Promise(r => setTimeout(r, 800)); 
       const postcodeNum = parseInt(customer.postcode);
       const isEastMalaysia = postcodeNum >= 87000 && postcodeNum <= 99999;
-      
       let options: ShippingOption[] = [];
       if (isEastMalaysia) {
         options.push({ service_id: 'poslaju_air', courier_name: 'Pos Laju', service_type: 'Air', price: 20 + (totalWeight * 15), etd: '3-5 Days' });
@@ -378,9 +441,9 @@ const App = () => {
     if (hasShirtGift && selectedShirtSize) gifts.push(`Proride T-Shirt (${selectedShirtSize})`);
 
     try {
-      // 1. Save Order to Supabase
+      // 1. Save Order to Supabase (WITH NEW COLUMNS)
       if (supabase) {
-        const itemsSummary = cart.map(item => `${item.MODEL} ${item.VARIANT} - ${item.POSITION} (x${item.QUANTITY})`).join(', ');
+        const itemsSummary = cart.map(item => `${item.MODEL} ${item.VARIANT} - ${item.POSITION} (x${item.PRICE})`).join(', ');
         const { data, error } = await supabase.from('orders').insert([{
             created_at: getMalaysiaTime(),
             customer_name: customer.name,
@@ -396,7 +459,7 @@ const App = () => {
             items_summary: itemsSummary,
             discount_amount: appliedVoucher?.amount || 0,
             voucher_code: appliedVoucher?.code || null,
-            gifts: gifts,
+            gifts: gifts, // Correctly saving gifts array now
             status: 'pending_payment'
         }]).select('id').single();
         
@@ -425,7 +488,6 @@ const App = () => {
             billContentEmail: 'Thank you for your purchase!',
             billChargeToCustomer: '1'
          });
-
          try {
              const response = await fetch('https://toyyibpay.com/index.php/api/createBill', {
                 method: 'POST',
@@ -442,12 +504,11 @@ const App = () => {
          } catch (e) {
              console.error(e);
              alert("Direct API call blocked. Showing simulator.");
-             setShowPaymentModal(true); // Fallback
+             setShowPaymentModal(true); 
          }
       } else {
-        setShowPaymentModal(true); // Simulator
+        setShowPaymentModal(true); 
       }
-
     } catch (err) {
       setErrorMsg("Payment processing failed.");
     } finally {
@@ -455,7 +516,7 @@ const App = () => {
     }
   };
 
-  const finalizeMockPayment = (success: boolean) => {
+  const finalizeMockPayment = async (success: boolean) => {
     setShowPaymentModal(false);
     if (success && selectedCourier) {
       const gifts = ['Proride Sticker'];
@@ -463,34 +524,28 @@ const App = () => {
       
       setOrderSuccess({
         billCode: 'TP-MOCK-' + Math.floor(Math.random() * 100000),
-        transactionId: 'TXN-' + Date.now(),
-        amount: finalTotal,
-        date: new Date().toLocaleString(),
         items: [...cart],
-        customer: { ...customer },
-        shipping: { courier: selectedCourier.courier_name, type: selectedCourier.service_type, cost: selectedCourier.price },
+        amount: finalTotal,
         discount: appliedVoucher?.amount || 0,
-        voucherCode: appliedVoucher?.code,
         gifts: gifts
       });
+      
+      // Secure Stock Update via RPC
+      if (supabase) {
+          for (const item of cart) {
+              await supabase.rpc('decrement_stock', { p_code: item.CODE, qty: 1 });
+          }
+          if (hasShirtGift && selectedShirtSize) {
+              await supabase.rpc('decrement_stock', { p_code: `GIFT-SHIRT-${selectedShirtSize}`, qty: 1 });
+          }
+          // Refresh local view
+          fetchStock();
+      }
+      
       setCart([]);
       setAppliedVoucher(null);
       setVoucherInput('');
       setSelectedShirtSize('');
-      
-      // Decrease Stock in DB if Success (Mock)
-      if (supabase && isAdmin) {
-          cart.forEach(item => {
-              const current = stockLevels[item.CODE] || 0;
-              updateStock(item.CODE, Math.max(0, current - 1));
-          });
-          // Decrease Gift Stock
-          if (hasShirtGift && selectedShirtSize) {
-              const giftCode = `GIFT-SHIRT-${selectedShirtSize}`;
-              const current = stockLevels[giftCode] || 0;
-              updateStock(giftCode, Math.max(0, current - 1));
-          }
-      }
     }
   };
 
@@ -532,7 +587,6 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-gray-50 text-slate-800 font-sans pb-20">
-      {/* Header */}
       <header className="bg-white shadow-sm sticky top-0 z-40">
         <div className="max-w-5xl mx-auto px-4 py-4 flex justify-between items-center">
           <div className="flex items-center gap-2">
@@ -546,17 +600,15 @@ const App = () => {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="max-w-5xl mx-auto px-4 py-8">
         {!isCheckout ? (
           <div className="space-y-8">
-            {/* Model Selection */}
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 grid md:grid-cols-2 gap-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Car Model</label>
                 <select className="w-full p-3 border rounded-lg" value={selectedModel} onChange={(e) => { setSelectedModel(e.target.value); setSelectedVariant(''); }}>
                   <option value="">Select a Model</option>
-                  {modelList.map(m => <option key={m} value={m}>{m}</option>)}
+                  {dbModels.map(m => <option key={m} value={m}>{m}</option>)}
                 </select>
               </div>
               <div>
@@ -568,7 +620,6 @@ const App = () => {
               </div>
             </div>
 
-            {/* Products */}
             {selectedModel && selectedVariant && (
               <div className="bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden animate-fade-in">
                 <div className={`${variantStyles.header} p-4 text-center`}><h2 className="text-xl font-bold">{selectedModel} - {selectedVariant}</h2></div>
@@ -643,7 +694,6 @@ const App = () => {
             )}
           </div>
         ) : (
-          /* Checkout Layout */
           <div className="grid lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2 space-y-6">
                 <button onClick={() => setIsCheckout(false)} className="text-sm text-gray-500">← Back</button>
@@ -673,12 +723,10 @@ const App = () => {
                 </div>
             </div>
             
-            {/* Order Summary */}
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-fit sticky top-24">
                 <h2 className="font-bold mb-4">Summary</h2>
                 {cart.map(i => <div key={i.cartId} className="flex justify-between text-sm mb-2"><span>{i.MODEL} {i.VARIANT}</span><span>RM {i.PRICE}</span></div>)}
                 
-                {/* Free Gifts Logic */}
                 <div className="border-t border-dashed my-3 py-2">
                     <div className="flex justify-between text-sm text-green-600 font-bold items-center mb-1">
                         <span className="flex items-center gap-1"><Gift className="w-3 h-3"/> Proride Sticker (x1)</span>
@@ -709,7 +757,6 @@ const App = () => {
                     )}
                 </div>
 
-                {/* Voucher Code */}
                 <div className="border-t pt-4 mt-2">
                     <div className="flex gap-2 mb-2">
                         <input 
@@ -728,7 +775,6 @@ const App = () => {
                     {voucherMsg && <div className={`text-xs mb-2 ${appliedVoucher ? 'text-green-600' : 'text-red-500'}`}>{voucherMsg}</div>}
                 </div>
 
-                {/* Totals */}
                 <div className="border-t pt-2 space-y-1">
                     <div className="flex justify-between text-sm text-gray-500"><span>Subtotal</span><span>RM {subtotal.toFixed(2)}</span></div>
                     {selectedCourier && <div className="flex justify-between text-sm text-gray-500"><span>Shipping</span><span>RM {selectedCourier.price.toFixed(2)}</span></div>}
@@ -745,7 +791,6 @@ const App = () => {
         )}
       </main>
       
-      {/* Footer & Admin */}
       <footer className="bg-white border-t py-8 mt-12">
           <div className="max-w-5xl mx-auto px-4 text-center">
               <p className="text-gray-400 text-sm mb-2">&copy; 2024 Proride Parts Store. All rights reserved.</p>
@@ -763,7 +808,6 @@ const App = () => {
           </div>
       </footer>
 
-      {/* Admin Login Modal (Reusable Modal for Admin Tasks) */}
       {(showAdminLogin || isAdmin) && (
           <div className={`fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 ${isAdmin ? 'items-end sm:items-center' : ''}`}>
              {!isAdmin ? (
@@ -778,16 +822,16 @@ const App = () => {
                     </form>
                  </div>
              ) : (
-                 /* Admin Dashboard Modal */
                  <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[80vh] flex flex-col">
                      <div className="p-4 border-b flex justify-between items-center bg-gray-50 rounded-t-xl">
                          <h3 className="font-bold flex items-center gap-2"><Database className="w-5 h-5"/> Shop Management</h3>
                          <button onClick={() => setIsAdmin(false)} className="text-gray-500 hover:text-red-500"><X/></button>
                      </div>
-                     <div className="flex border-b">
-                         <button onClick={() => setAdminTab('stock')} className={`flex-1 p-3 text-sm font-bold ${adminTab === 'stock' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}>Product Stock</button>
-                         <button onClick={() => setAdminTab('gifts')} className={`flex-1 p-3 text-sm font-bold ${adminTab === 'gifts' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}>Gifts Inventory</button>
-                         <button onClick={() => setAdminTab('vouchers')} className={`flex-1 p-3 text-sm font-bold ${adminTab === 'vouchers' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}>Vouchers</button>
+                     <div className="flex border-b overflow-x-auto">
+                         <button onClick={() => setAdminTab('stock')} className={`flex-1 p-3 text-sm font-bold whitespace-nowrap ${adminTab === 'stock' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}>Product Stock</button>
+                         <button onClick={() => setAdminTab('gifts')} className={`flex-1 p-3 text-sm font-bold whitespace-nowrap ${adminTab === 'gifts' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}>Gifts Inventory</button>
+                         <button onClick={() => setAdminTab('vouchers')} className={`flex-1 p-3 text-sm font-bold whitespace-nowrap ${adminTab === 'vouchers' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}>Vouchers</button>
+                         <button onClick={() => setAdminTab('settings')} className={`flex-1 p-3 text-sm font-bold whitespace-nowrap ${adminTab === 'settings' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}>Settings</button>
                      </div>
                      <div className="p-6 overflow-y-auto">
                          {adminTab === 'stock' && (
@@ -796,7 +840,6 @@ const App = () => {
                                      <p className="text-sm text-gray-500">Edit quantities for main products.</p>
                                      <button onClick={fetchStock} className="flex items-center gap-1 text-sm text-blue-600"><RefreshCw className="w-3 h-3"/> Refresh</button>
                                  </div>
-                                 {/* Only showing if Model selected to avoid huge list, or show simple list */}
                                  {selectedModel && selectedVariant ? (
                                      displayedProducts.map(p => (
                                          <div key={p.CODE} className="flex justify-between items-center border-b py-2">
@@ -843,7 +886,6 @@ const App = () => {
                                      </div>
                                      <button onClick={createVoucher} className="bg-blue-600 text-white w-full py-2 rounded text-sm font-bold">Create Voucher</button>
                                  </div>
-                                 
                                  <div>
                                      <h4 className="font-bold text-sm mb-2">Active Vouchers</h4>
                                      <div className="border rounded-lg overflow-hidden">
@@ -858,10 +900,22 @@ const App = () => {
                                                          <td className="p-2"><button onClick={() => deleteVoucher(v.id)} className="text-red-500 hover:bg-red-50 p-1 rounded"><Trash2 className="w-4 h-4"/></button></td>
                                                      </tr>
                                                  ))}
-                                                 {adminVouchers.length === 0 && <tr><td colSpan={4} className="p-4 text-center text-gray-400">No vouchers found.</td></tr>}
                                              </tbody>
                                          </table>
                                      </div>
+                                 </div>
+                             </div>
+                         )}
+
+                         {adminTab === 'settings' && (
+                             <div className="space-y-4">
+                                 <div className="bg-yellow-50 border border-yellow-200 p-4 rounded-lg">
+                                     <h4 className="font-bold flex items-center gap-2 mb-2"><Database className="w-4 h-4"/> Database Migration</h4>
+                                     <p className="text-sm text-gray-600 mb-4">Click below to upload the initial product catalog, models, and images from the file system to Supabase. Do this only once!</p>
+                                     <button onClick={seedDatabase} disabled={isSeeding} className="bg-yellow-600 text-white px-4 py-2 rounded font-bold flex items-center gap-2 disabled:opacity-50">
+                                         {isSeeding ? <Loader2 className="animate-spin w-4 h-4"/> : <UploadCloud className="w-4 h-4"/>}
+                                         {isSeeding ? "Seeding..." : "Seed Database"}
+                                     </button>
                                  </div>
                              </div>
                          )}
@@ -869,30 +923,6 @@ const App = () => {
                  </div>
              )}
           </div>
-      )}
-
-      {/* Cart Modal */}
-      {isCartOpen && (
-        <div className="fixed inset-0 z-50 flex justify-end">
-          <div className="absolute inset-0 bg-black/30" onClick={() => setIsCartOpen(false)} />
-          <div className="relative w-full max-w-md bg-white h-full shadow-2xl flex flex-col p-4">
-            <div className="flex justify-between items-center mb-4"><h2 className="font-bold text-lg">Cart</h2><button onClick={() => setIsCartOpen(false)}><X/></button></div>
-            <div className="flex-1 overflow-auto">{cart.map(c => <div key={c.cartId} className="border-b py-2 flex justify-between"><div>{c.MODEL} {c.VARIANT}</div><button onClick={() => removeFromCart(c.cartId)} className="text-red-500"><X className="w-4 h-4"/></button></div>)}</div>
-            <button onClick={() => { setIsCartOpen(false); setIsCheckout(true); }} disabled={!cart.length} className="w-full bg-blue-900 text-white py-3 rounded-xl font-bold mt-4 disabled:opacity-50">Checkout</button>
-          </div>
-        </div>
-      )}
-      
-      {/* Mock Payment Modal */}
-      {showPaymentModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="bg-white p-6 rounded-xl shadow-xl max-w-sm w-full">
-                <h3 className="font-bold text-lg mb-2">Payment Simulator</h3>
-                <p className="text-sm text-gray-500 mb-4">ToyyibPay keys missing or API blocked.</p>
-                <button onClick={() => finalizeMockPayment(true)} className="w-full bg-green-600 text-white py-2 rounded mb-2">Simulate Success</button>
-                <button onClick={() => finalizeMockPayment(false)} className="w-full border py-2 rounded">Cancel</button>
-            </div>
-        </div>
       )}
     </div>
   );
