@@ -262,7 +262,7 @@ export const products = [
     "VARIANT": "STANDARD",
     "POSITION": "1SET",
     "QUANTITY": 4,
-    "PRICE": 612.3
+    "PRICE": 1.0
   },
   {
     "CODE": "ALFST",
@@ -1197,3 +1197,4 @@ export const images = {
     "AXIA/BEZZA-Performance Absorber": "https://i.ibb.co/YYXpHbb/AXIA-PERF-1-CARSET.jpg",
     "AXIA/BEZZA-Sport Spring": "https://i.ibb.co/xShJSs32/AXIA-SPORT-SPRING-1-CAR-SET.jpg"
 };
+
