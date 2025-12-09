@@ -1,12 +1,11 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ShoppingCart, Truck, CreditCard, Check, X, Loader2, Package, Ship, Plane, Printer, ExternalLink, AlertCircle, Database, AlertTriangle, Lock, LogIn, Save, RefreshCw } from 'lucide-react';
+import { ShoppingCart, Truck, CreditCard, Check, X, Loader2, Package, Ship, Plane, Printer, ExternalLink, AlertCircle, Database, AlertTriangle, Lock, LogIn, Save, RefreshCw, Gift, Ticket, Calendar, Trash2 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 import { products, models, images } from './data';
 
 // --- Configuration (Environment Variables) ---
-// In Vercel, you will set these in the "Environment Variables" section.
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 const TOYYIB_SECRET = import.meta.env.VITE_TOYYIB_SECRET || '';
@@ -43,6 +42,14 @@ interface ShippingOption {
   etd: string;
 }
 
+interface Voucher {
+  id: number;
+  code: string;
+  amount: number;
+  valid_from: string;
+  valid_to: string;
+}
+
 interface OrderReceipt {
   billCode: string;
   transactionId: string;
@@ -55,6 +62,9 @@ interface OrderReceipt {
     cost: number;
     type: string;
   };
+  discount: number;
+  voucherCode?: string;
+  gifts: string[];
 }
 
 // --- Helper Functions ---
@@ -85,6 +95,8 @@ const getVariantStyles = (variant: string) => {
   }
 };
 
+const SHIRT_SIZES = ['S', 'M', 'L', 'XL', 'XXL'];
+
 // --- Components ---
 
 const App = () => {
@@ -101,6 +113,9 @@ const App = () => {
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [adminPass, setAdminPass] = useState('');
   const [editingStock, setEditingStock] = useState<Record<string, number>>({});
+  const [adminTab, setAdminTab] = useState<'stock' | 'vouchers' | 'gifts'>('stock');
+  const [adminVouchers, setAdminVouchers] = useState<Voucher[]>([]);
+  const [newVoucher, setNewVoucher] = useState({ code: '', amount: '', from: '', to: '' });
 
   // State: Cart & UI
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -110,6 +125,12 @@ const App = () => {
   
   // State: Checkout Form
   const [customer, setCustomer] = useState<CustomerDetails>({ name: '', email: '', phone: '', address: '', postcode: '' });
+  
+  // State: Voucher & Gifts
+  const [voucherInput, setVoucherInput] = useState('');
+  const [appliedVoucher, setAppliedVoucher] = useState<{code: string, amount: number} | null>(null);
+  const [voucherMsg, setVoucherMsg] = useState('');
+  const [selectedShirtSize, setSelectedShirtSize] = useState('');
 
   // State: Shipping & Payment
   const [availableCouriers, setAvailableCouriers] = useState<ShippingOption[]>([]);
@@ -138,7 +159,7 @@ const App = () => {
     if (!supabase) return;
     setIsLoadingStock(true);
     
-    // We assume a table named 'inventory' with columns: product_code (text), quantity (int)
+    // Fetch all stock including gifts
     const { data, error } = await supabase.from('inventory').select('*');
     
     if (error) {
@@ -152,6 +173,18 @@ const App = () => {
     }
     setIsLoadingStock(false);
   };
+
+  const fetchVouchers = async () => {
+      if (!supabase || !isAdmin) return;
+      const { data } = await supabase.from('vouchers').select('*').order('valid_from', { ascending: false });
+      if (data) setAdminVouchers(data);
+  };
+
+  useEffect(() => {
+      if (isAdmin && adminTab === 'vouchers') {
+          fetchVouchers();
+      }
+  }, [isAdmin, adminTab]);
 
   // --- Computed Data ---
   const modelList = useMemo(() => Object.keys(models), []);
@@ -180,13 +213,17 @@ const App = () => {
   const variantStyles = useMemo(() => getVariantStyles(selectedVariant), [selectedVariant]);
   const subtotal = cart.reduce((sum, item) => sum + item.PRICE, 0);
   const totalWeight = cart.reduce((sum, item) => sum + getProductWeight(item), 0);
-  const finalTotal = subtotal + (selectedCourier ? selectedCourier.price : 0);
+  
+  // Logic: 1Set (Absorber Set) OR Sport Spring (which is also 1Set in data) triggers T-Shirt
+  const hasShirtGift = useMemo(() => {
+      return cart.some(item => item.POSITION === '1SET');
+  }, [cart]);
+
+  const finalTotal = Math.max(0, subtotal + (selectedCourier ? selectedCourier.price : 0) - (appliedVoucher?.amount || 0));
 
   // --- Admin Handlers ---
   const handleAdminLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    // Simple hardcoded password for demo purposes. 
-    // In production, use Supabase Auth.
     if (adminPass === 'admin123') {
         setIsAdmin(true);
         setShowAdminLogin(false);
@@ -197,15 +234,11 @@ const App = () => {
 
   const updateStock = async (code: string, newQty: number) => {
     if (!supabase) return alert("Database not connected");
-    
-    // Upsert: Update if exists, Insert if not
     const { error } = await supabase
         .from('inventory')
         .upsert({ product_code: code, quantity: newQty }, { onConflict: 'product_code' });
-    
     if (error) {
         alert("Failed to update stock");
-        console.error(error);
     } else {
         setStockLevels(prev => ({ ...prev, [code]: newQty }));
         setEditingStock(prev => {
@@ -216,19 +249,36 @@ const App = () => {
     }
   };
 
+  const createVoucher = async () => {
+      if (!supabase) return;
+      if (!newVoucher.code || !newVoucher.amount || !newVoucher.from || !newVoucher.to) return alert("Fill all fields");
+      
+      const { error } = await supabase.from('vouchers').insert([{
+          code: newVoucher.code.toUpperCase(),
+          amount: parseFloat(newVoucher.amount),
+          valid_from: new Date(newVoucher.from).toISOString(),
+          valid_to: new Date(newVoucher.to).toISOString()
+      }]);
+      
+      if (error) alert(error.message);
+      else {
+          setNewVoucher({ code: '', amount: '', from: '', to: '' });
+          fetchVouchers();
+      }
+  };
+
+  const deleteVoucher = async (id: number) => {
+      if (!confirm("Delete voucher?")) return;
+      await supabase?.from('vouchers').delete().eq('id', id);
+      fetchVouchers();
+  };
+
   // --- Shop Handlers ---
 
   const addToCart = (product: Product) => {
-    // Check Real Stock
-    const currentStock = stockLevels[product.CODE] ?? 0; // Default to 0 if not found in DB
-    
-    // Check if already in cart
+    const currentStock = stockLevels[product.CODE] ?? 0;
     const inCart = cart.filter(c => c.CODE === product.CODE).length;
-    
-    if (currentStock - inCart <= 0) {
-        return alert("Out of stock!");
-    }
-
+    if (currentStock - inCart <= 0) return alert("Out of stock!");
     setCart([...cart, { ...product, cartId: Math.random().toString(36).substr(2, 9) }]);
     setIsCartOpen(true);
   };
@@ -245,6 +295,39 @@ const App = () => {
         setAvailableCouriers([]);
         setSelectedCourier(null);
     }
+  };
+
+  const applyVoucher = async () => {
+      setVoucherMsg('');
+      if (!voucherInput.trim()) return;
+      if (!supabase) return setVoucherMsg("System offline");
+
+      // Check voucher
+      const { data, error } = await supabase
+          .from('vouchers')
+          .select('*')
+          .eq('code', voucherInput.toUpperCase())
+          .eq('is_active', true)
+          .single();
+
+      if (error || !data) {
+          setVoucherMsg("Invalid voucher code");
+          setAppliedVoucher(null);
+          return;
+      }
+
+      const now = new Date();
+      const validFrom = new Date(data.valid_from);
+      const validTo = new Date(data.valid_to);
+
+      if (now < validFrom || now > validTo) {
+          setVoucherMsg("Voucher expired or not yet valid");
+          setAppliedVoucher(null);
+          return;
+      }
+
+      setAppliedVoucher({ code: data.code, amount: data.amount });
+      setVoucherMsg(`Voucher applied! -RM${data.amount}`);
   };
 
   // --- Payment & Shipping Logic ---
@@ -285,11 +368,14 @@ const App = () => {
   const initiatePayment = async () => {
     if (!customer.name || !customer.email || !customer.phone || !customer.address) return setErrorMsg("Fill all details.");
     if (!selectedCourier) return setErrorMsg("Select a courier.");
+    if (hasShirtGift && !selectedShirtSize) return setErrorMsg("Please select your Free T-Shirt size.");
 
     setIsProcessingPayment(true);
     setErrorMsg('');
 
     let orderId: number | null = null;
+    const gifts = ['Proride Sticker'];
+    if (hasShirtGift && selectedShirtSize) gifts.push(`Proride T-Shirt (${selectedShirtSize})`);
 
     try {
       // 1. Save Order to Supabase
@@ -308,6 +394,9 @@ const App = () => {
             service_type: selectedCourier.service_type,
             items: cart,
             items_summary: itemsSummary,
+            discount_amount: appliedVoucher?.amount || 0,
+            voucher_code: appliedVoucher?.code || null,
+            gifts: gifts,
             status: 'pending_payment'
         }]).select('id').single();
         
@@ -321,7 +410,7 @@ const App = () => {
             userSecretKey: TOYYIB_SECRET,
             categoryCode: TOYYIB_CODE,
             billName: `Proride - Order #${orderId || 'New'}`,
-            billDescription: `Payment for ${cart.length} items`,
+            billDescription: `Parts + Shipping (Ref: ${orderId})`,
             billPriceSetting: '1',
             billPayorInfo: '1',
             billAmount: (finalTotal * 100).toFixed(0),
@@ -369,6 +458,9 @@ const App = () => {
   const finalizeMockPayment = (success: boolean) => {
     setShowPaymentModal(false);
     if (success && selectedCourier) {
+      const gifts = ['Proride Sticker'];
+      if (hasShirtGift && selectedShirtSize) gifts.push(`Proride T-Shirt (${selectedShirtSize})`);
+      
       setOrderSuccess({
         billCode: 'TP-MOCK-' + Math.floor(Math.random() * 100000),
         transactionId: 'TXN-' + Date.now(),
@@ -376,9 +468,15 @@ const App = () => {
         date: new Date().toLocaleString(),
         items: [...cart],
         customer: { ...customer },
-        shipping: { courier: selectedCourier.courier_name, type: selectedCourier.service_type, cost: selectedCourier.price }
+        shipping: { courier: selectedCourier.courier_name, type: selectedCourier.service_type, cost: selectedCourier.price },
+        discount: appliedVoucher?.amount || 0,
+        voucherCode: appliedVoucher?.code,
+        gifts: gifts
       });
       setCart([]);
+      setAppliedVoucher(null);
+      setVoucherInput('');
+      setSelectedShirtSize('');
       
       // Decrease Stock in DB if Success (Mock)
       if (supabase && isAdmin) {
@@ -386,6 +484,12 @@ const App = () => {
               const current = stockLevels[item.CODE] || 0;
               updateStock(item.CODE, Math.max(0, current - 1));
           });
+          // Decrease Gift Stock
+          if (hasShirtGift && selectedShirtSize) {
+              const giftCode = `GIFT-SHIRT-${selectedShirtSize}`;
+              const current = stockLevels[giftCode] || 0;
+              updateStock(giftCode, Math.max(0, current - 1));
+          }
       }
     }
   };
@@ -397,7 +501,9 @@ const App = () => {
     setCustomer({ name: '', email: '', phone: '', address: '', postcode: '' });
     setAvailableCouriers([]);
     setSelectedCourier(null);
-    // Refresh stock
+    setAppliedVoucher(null);
+    setVoucherInput('');
+    setSelectedShirtSize('');
     fetchStock();
   }
 
@@ -411,6 +517,12 @@ const App = () => {
              </div>
              <h1 className="text-3xl font-bold text-gray-900 mb-2">Order Successful</h1>
              <p className="text-gray-500 mb-8">Ref: {orderSuccess.billCode}</p>
+             <div className="bg-gray-50 p-4 rounded text-left text-sm mb-6">
+                 <div className="font-bold mb-2">Includes:</div>
+                 {orderSuccess.items.map(i => <div key={i.cartId}>• {i.MODEL} {i.VARIANT}</div>)}
+                 {orderSuccess.gifts.map(g => <div key={g} className="text-green-600">• {g} (FREE)</div>)}
+                 {orderSuccess.discount > 0 && <div className="mt-2 text-blue-600 font-bold">Discount: -RM {orderSuccess.discount.toFixed(2)}</div>}
+             </div>
              <button onClick={resetShop} className="w-full bg-blue-900 text-white py-3 rounded-xl font-bold hover:bg-blue-800">
                 Back to Store
              </button>
@@ -531,7 +643,7 @@ const App = () => {
             )}
           </div>
         ) : (
-          /* Checkout Layout (Simplified for brevity as logic mostly unchanged) */
+          /* Checkout Layout */
           <div className="grid lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2 space-y-6">
                 <button onClick={() => setIsCheckout(false)} className="text-sm text-gray-500">← Back</button>
@@ -560,11 +672,71 @@ const App = () => {
                     )}
                 </div>
             </div>
+            
+            {/* Order Summary */}
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 h-fit sticky top-24">
                 <h2 className="font-bold mb-4">Summary</h2>
-                {cart.map(i => <div key={i.cartId} className="flex justify-between text-sm mb-2"><span>{i.MODEL}</span><span>RM {i.PRICE}</span></div>)}
-                <div className="border-t pt-2 mt-2 font-bold flex justify-between"><span>Total</span><span>RM {finalTotal.toFixed(2)}</span></div>
-                {errorMsg && <div className="text-red-500 text-sm mt-2">{errorMsg}</div>}
+                {cart.map(i => <div key={i.cartId} className="flex justify-between text-sm mb-2"><span>{i.MODEL} {i.VARIANT}</span><span>RM {i.PRICE}</span></div>)}
+                
+                {/* Free Gifts Logic */}
+                <div className="border-t border-dashed my-3 py-2">
+                    <div className="flex justify-between text-sm text-green-600 font-bold items-center mb-1">
+                        <span className="flex items-center gap-1"><Gift className="w-3 h-3"/> Proride Sticker (x1)</span>
+                        <span>FREE</span>
+                    </div>
+                    {hasShirtGift && (
+                        <div className="space-y-2 mt-2">
+                            <div className="flex justify-between text-sm text-green-600 font-bold items-center">
+                                <span className="flex items-center gap-1"><Gift className="w-3 h-3"/> Proride T-Shirt (x1)</span>
+                                <span>FREE</span>
+                            </div>
+                            <select 
+                                value={selectedShirtSize} 
+                                onChange={(e) => setSelectedShirtSize(e.target.value)}
+                                className="w-full text-sm border border-green-200 rounded p-2 bg-green-50"
+                            >
+                                <option value="">Select Size...</option>
+                                {SHIRT_SIZES.map(size => {
+                                    const qty = stockLevels[`GIFT-SHIRT-${size}`] ?? 0;
+                                    return (
+                                        <option key={size} value={size} disabled={qty <= 0}>
+                                            {size} {qty <= 0 ? '(Out of Stock)' : `(${qty} left)`}
+                                        </option>
+                                    );
+                                })}
+                            </select>
+                        </div>
+                    )}
+                </div>
+
+                {/* Voucher Code */}
+                <div className="border-t pt-4 mt-2">
+                    <div className="flex gap-2 mb-2">
+                        <input 
+                            placeholder="Voucher Code" 
+                            className="border p-2 rounded text-sm flex-1 uppercase"
+                            value={voucherInput}
+                            onChange={(e) => setVoucherInput(e.target.value)}
+                            disabled={!!appliedVoucher}
+                        />
+                        {appliedVoucher ? (
+                            <button onClick={() => { setAppliedVoucher(null); setVoucherInput(''); setVoucherMsg(''); }} className="bg-red-100 text-red-500 p-2 rounded"><X className="w-4 h-4"/></button>
+                        ) : (
+                            <button onClick={applyVoucher} className="bg-gray-800 text-white p-2 rounded text-xs font-bold">APPLY</button>
+                        )}
+                    </div>
+                    {voucherMsg && <div className={`text-xs mb-2 ${appliedVoucher ? 'text-green-600' : 'text-red-500'}`}>{voucherMsg}</div>}
+                </div>
+
+                {/* Totals */}
+                <div className="border-t pt-2 space-y-1">
+                    <div className="flex justify-between text-sm text-gray-500"><span>Subtotal</span><span>RM {subtotal.toFixed(2)}</span></div>
+                    {selectedCourier && <div className="flex justify-between text-sm text-gray-500"><span>Shipping</span><span>RM {selectedCourier.price.toFixed(2)}</span></div>}
+                    {appliedVoucher && <div className="flex justify-between text-sm text-green-600"><span>Discount</span><span>-RM {appliedVoucher.amount.toFixed(2)}</span></div>}
+                    <div className="flex justify-between font-bold text-lg mt-2 pt-2 border-t"><span>Total</span><span>RM {finalTotal.toFixed(2)}</span></div>
+                </div>
+
+                {errorMsg && <div className="text-red-500 text-sm mt-2 flex items-center gap-1"><AlertCircle className="w-4 h-4"/> {errorMsg}</div>}
                 <button onClick={initiatePayment} disabled={isProcessingPayment || !selectedCourier} className="w-full bg-blue-600 text-white py-3 rounded-xl mt-4 font-bold disabled:opacity-50">
                     {isProcessingPayment ? "Processing..." : "Pay Now"}
                 </button>
@@ -573,44 +745,129 @@ const App = () => {
         )}
       </main>
       
-      {/* Footer Admin Login */}
+      {/* Footer & Admin */}
       <footer className="bg-white border-t py-8 mt-12">
           <div className="max-w-5xl mx-auto px-4 text-center">
-              <p className="text-gray-400 text-sm mb-4">&copy; 2024 Proride Parts Store. All rights reserved.</p>
+              <p className="text-gray-400 text-sm mb-2">&copy; 2024 Proride Parts Store. All rights reserved.</p>
+              <div className="text-gray-300 text-xs font-mono mb-4 flex items-center justify-center gap-1"><Lock className="w-3 h-3"/> System Locked: 09 Dec 2025, 10:12PM</div>
               {!isAdmin ? (
                   <button onClick={() => setShowAdminLogin(true)} className="text-gray-300 hover:text-gray-500 text-xs flex items-center justify-center gap-1 mx-auto">
-                      <Lock className="w-3 h-3" /> Staff Access
+                      <LogIn className="w-3 h-3" /> Staff Access
                   </button>
               ) : (
                   <div className="flex gap-4 justify-center">
                     <div className="text-green-600 text-xs font-bold flex items-center gap-1"><Check className="w-3 h-3"/> Admin Mode Active</div>
-                    <button onClick={() => fetchStock()} className="text-blue-600 text-xs flex items-center gap-1 hover:underline"><RefreshCw className="w-3 h-3"/> Refresh Stock</button>
                     <button onClick={() => setIsAdmin(false)} className="text-red-400 text-xs hover:text-red-600">Logout</button>
                   </div>
               )}
           </div>
       </footer>
 
-      {/* Admin Login Modal */}
-      {showAdminLogin && (
-          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-              <div className="bg-white p-6 rounded-xl shadow-xl w-full max-w-sm">
-                  <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><LogIn className="w-5 h-5"/> Staff Login</h3>
-                  <form onSubmit={handleAdminLogin}>
-                      <input 
-                        type="password" 
-                        className="w-full border p-2 rounded mb-4" 
-                        placeholder="Enter admin password" 
-                        value={adminPass}
-                        onChange={e => setAdminPass(e.target.value)}
-                        autoFocus
-                      />
-                      <div className="flex justify-end gap-2">
-                          <button type="button" onClick={() => setShowAdminLogin(false)} className="px-4 py-2 text-gray-500">Cancel</button>
-                          <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Login</button>
-                      </div>
-                  </form>
-              </div>
+      {/* Admin Login Modal (Reusable Modal for Admin Tasks) */}
+      {(showAdminLogin || isAdmin) && (
+          <div className={`fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 ${isAdmin ? 'items-end sm:items-center' : ''}`}>
+             {!isAdmin ? (
+                 <div className="bg-white p-6 rounded-xl shadow-xl w-full max-w-sm">
+                    <h3 className="font-bold text-lg mb-4 flex items-center gap-2"><LogIn className="w-5 h-5"/> Staff Login</h3>
+                    <form onSubmit={handleAdminLogin}>
+                        <input type="password" className="w-full border p-2 rounded mb-4" placeholder="Enter password" value={adminPass} onChange={e => setAdminPass(e.target.value)} autoFocus />
+                        <div className="flex justify-end gap-2">
+                            <button type="button" onClick={() => setShowAdminLogin(false)} className="px-4 py-2 text-gray-500">Cancel</button>
+                            <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded">Login</button>
+                        </div>
+                    </form>
+                 </div>
+             ) : (
+                 /* Admin Dashboard Modal */
+                 <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[80vh] flex flex-col">
+                     <div className="p-4 border-b flex justify-between items-center bg-gray-50 rounded-t-xl">
+                         <h3 className="font-bold flex items-center gap-2"><Database className="w-5 h-5"/> Shop Management</h3>
+                         <button onClick={() => setIsAdmin(false)} className="text-gray-500 hover:text-red-500"><X/></button>
+                     </div>
+                     <div className="flex border-b">
+                         <button onClick={() => setAdminTab('stock')} className={`flex-1 p-3 text-sm font-bold ${adminTab === 'stock' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}>Product Stock</button>
+                         <button onClick={() => setAdminTab('gifts')} className={`flex-1 p-3 text-sm font-bold ${adminTab === 'gifts' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}>Gifts Inventory</button>
+                         <button onClick={() => setAdminTab('vouchers')} className={`flex-1 p-3 text-sm font-bold ${adminTab === 'vouchers' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500'}`}>Vouchers</button>
+                     </div>
+                     <div className="p-6 overflow-y-auto">
+                         {adminTab === 'stock' && (
+                             <div className="space-y-4">
+                                 <div className="flex justify-between items-center mb-4">
+                                     <p className="text-sm text-gray-500">Edit quantities for main products.</p>
+                                     <button onClick={fetchStock} className="flex items-center gap-1 text-sm text-blue-600"><RefreshCw className="w-3 h-3"/> Refresh</button>
+                                 </div>
+                                 {/* Only showing if Model selected to avoid huge list, or show simple list */}
+                                 {selectedModel && selectedVariant ? (
+                                     displayedProducts.map(p => (
+                                         <div key={p.CODE} className="flex justify-between items-center border-b py-2">
+                                             <div className="text-sm"><span className="font-bold">{p.CODE}</span> {p.MODEL} {p.POSITION}</div>
+                                             <div className="flex gap-2">
+                                                 <input type="number" className="w-20 border p-1 rounded text-center" value={editingStock[p.CODE] ?? (stockLevels[p.CODE]||0)} onChange={(e) => setEditingStock({...editingStock, [p.CODE]: parseInt(e.target.value)})} />
+                                                 {editingStock[p.CODE] !== undefined && <button onClick={() => updateStock(p.CODE, editingStock[p.CODE]!)} className="bg-green-600 text-white p-1 rounded"><Save className="w-4 h-4"/></button>}
+                                             </div>
+                                         </div>
+                                     ))
+                                 ) : (
+                                     <div className="text-center py-8 text-gray-400">Select a Model & Variant on the main page to filter stock here.</div>
+                                 )}
+                             </div>
+                         )}
+
+                         {adminTab === 'gifts' && (
+                             <div className="space-y-4">
+                                 <h4 className="font-bold mb-4">T-Shirt Inventory</h4>
+                                 {SHIRT_SIZES.map(size => {
+                                     const code = `GIFT-SHIRT-${size}`;
+                                     return (
+                                        <div key={code} className="flex justify-between items-center border-b py-2">
+                                            <div className="text-sm font-bold">Size {size}</div>
+                                            <div className="flex gap-2">
+                                                 <input type="number" className="w-20 border p-1 rounded text-center" value={editingStock[code] ?? (stockLevels[code]||0)} onChange={(e) => setEditingStock({...editingStock, [code]: parseInt(e.target.value)})} />
+                                                 {editingStock[code] !== undefined && <button onClick={() => updateStock(code, editingStock[code]!)} className="bg-green-600 text-white p-1 rounded"><Save className="w-4 h-4"/></button>}
+                                            </div>
+                                        </div>
+                                     );
+                                 })}
+                             </div>
+                         )}
+
+                         {adminTab === 'vouchers' && (
+                             <div className="space-y-6">
+                                 <div className="bg-gray-50 p-4 rounded-lg border">
+                                     <h4 className="font-bold text-sm mb-2">Create New Voucher</h4>
+                                     <div className="grid grid-cols-2 gap-2 mb-2">
+                                         <input placeholder="Code (e.g. PROMO10)" className="border p-2 rounded uppercase text-sm" value={newVoucher.code} onChange={e => setNewVoucher({...newVoucher, code: e.target.value})} />
+                                         <input type="number" placeholder="Amount (RM)" className="border p-2 rounded text-sm" value={newVoucher.amount} onChange={e => setNewVoucher({...newVoucher, amount: e.target.value})} />
+                                         <div className="flex flex-col"><label className="text-xs text-gray-500">Valid From</label><input type="date" className="border p-2 rounded text-sm" value={newVoucher.from} onChange={e => setNewVoucher({...newVoucher, from: e.target.value})} /></div>
+                                         <div className="flex flex-col"><label className="text-xs text-gray-500">Valid To</label><input type="date" className="border p-2 rounded text-sm" value={newVoucher.to} onChange={e => setNewVoucher({...newVoucher, to: e.target.value})} /></div>
+                                     </div>
+                                     <button onClick={createVoucher} className="bg-blue-600 text-white w-full py-2 rounded text-sm font-bold">Create Voucher</button>
+                                 </div>
+                                 
+                                 <div>
+                                     <h4 className="font-bold text-sm mb-2">Active Vouchers</h4>
+                                     <div className="border rounded-lg overflow-hidden">
+                                         <table className="w-full text-sm text-left">
+                                             <thead className="bg-gray-100"><tr><th className="p-2">Code</th><th className="p-2">Amount</th><th className="p-2">Ends</th><th className="p-2">Action</th></tr></thead>
+                                             <tbody>
+                                                 {adminVouchers.map(v => (
+                                                     <tr key={v.id} className="border-t">
+                                                         <td className="p-2 font-mono font-bold">{v.code}</td>
+                                                         <td className="p-2">RM {v.amount}</td>
+                                                         <td className="p-2">{new Date(v.valid_to).toLocaleDateString()}</td>
+                                                         <td className="p-2"><button onClick={() => deleteVoucher(v.id)} className="text-red-500 hover:bg-red-50 p-1 rounded"><Trash2 className="w-4 h-4"/></button></td>
+                                                     </tr>
+                                                 ))}
+                                                 {adminVouchers.length === 0 && <tr><td colSpan={4} className="p-4 text-center text-gray-400">No vouchers found.</td></tr>}
+                                             </tbody>
+                                         </table>
+                                     </div>
+                                 </div>
+                             </div>
+                         )}
+                     </div>
+                 </div>
+             )}
           </div>
       )}
 
@@ -626,7 +883,7 @@ const App = () => {
         </div>
       )}
       
-      {/* Mock Payment Modal (Fallback) */}
+      {/* Mock Payment Modal */}
       {showPaymentModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <div className="bg-white p-6 rounded-xl shadow-xl max-w-sm w-full">
