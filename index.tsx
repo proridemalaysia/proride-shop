@@ -1,10 +1,8 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ShoppingCart, Check, X, Loader2, Package, AlertCircle, Database, Lock, LogIn, Save, RefreshCw, Gift, Trash2, UploadCloud, ArrowRight } from 'lucide-react';
+import { ShoppingCart, Check, X, Loader2, Package, AlertCircle, Database, Lock, LogIn, Save, RefreshCw, Gift, Trash2, UploadCloud, ArrowRight, Printer, Home, ShoppingBag, Phone, Mail, MapPin } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
-// We import data only for the initial seeding process. 
-// Once seeded, the app relies on Supabase.
 import { products as initialProducts, models as initialModels, images as initialImages } from './data';
 
 // --- Configuration ---
@@ -20,7 +18,7 @@ interface Product {
   VARIANT: string;
   POSITION: string;
   PRICE: number;
-  QUANTITY?: number; // Used for stock display
+  QUANTITY?: number;
 }
 
 interface CartItem extends Product {
@@ -53,14 +51,25 @@ interface Voucher {
 
 interface OrderReceipt {
   billCode: string;
+  transactionId?: string;
+  date: string;
+  customer: CustomerDetails;
   items: CartItem[];
-  amount: number;
+  shipping: {
+      courier_name: string;
+      price: number;
+      service_type: string;
+  };
+  appliedVoucher?: {
+      code: string;
+      amount: number;
+  } | null;
+  amount: number; // Final total
   discount: number;
   gifts: string[];
 }
 
 // --- Helper Functions ---
-
 const getProductWeight = (product: Product): number => {
   if (product.VARIANT === 'SPORT SPRING') return 8;
   if (product.POSITION === 'FRONT') return 10;
@@ -92,11 +101,10 @@ const SHIRT_SIZES = ['S', 'M', 'L', 'XL', 'XXL'];
 // --- Components ---
 
 const App = () => {
-  // --- Data State (Fetched from Supabase) ---
+  // --- Data State ---
   const [dbProducts, setDbProducts] = useState<Product[]>([]);
   const [dbModels, setDbModels] = useState<string[]>([]);
   const [dbImages, setDbImages] = useState<Record<string, string>>({});
-  const [isDataLoaded, setIsDataLoaded] = useState(false);
 
   // State: Selection
   const [selectedModel, setSelectedModel] = useState<string>('');
@@ -149,7 +157,43 @@ const App = () => {
 
   // --- Effects ---
 
-  // Initial Fetch: Catalog & Stock
+  // Check URL for Payment Return
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const statusId = params.get('status_id');
+    const billCode = params.get('billcode');
+    const transactionId = params.get('transaction_id');
+
+    // If returning from ToyyibPay with success status (1) or pending (2)
+    if ((statusId === '1' || statusId === '2') && billCode) {
+        const savedOrder = localStorage.getItem('pendingOrder');
+        if (savedOrder) {
+            try {
+                const parsed = JSON.parse(savedOrder);
+                setOrderSuccess({
+                    billCode,
+                    transactionId: transactionId || 'N/A',
+                    date: new Date().toLocaleString(),
+                    customer: parsed.customer,
+                    items: parsed.cart,
+                    shipping: parsed.selectedCourier,
+                    appliedVoucher: parsed.appliedVoucher,
+                    amount: parsed.finalTotal,
+                    discount: parsed.appliedVoucher?.amount || 0,
+                    gifts: parsed.gifts
+                });
+                // Clear pending order
+                localStorage.removeItem('pendingOrder');
+                // Clean URL
+                window.history.replaceState({}, document.title, window.location.pathname);
+                
+            } catch (e) {
+                console.error("Failed to parse pending order", e);
+            }
+        }
+    }
+  }, []);
+
   useEffect(() => {
     if (supabase) {
       fetchCatalog();
@@ -157,7 +201,6 @@ const App = () => {
     }
   }, [supabase]);
 
-  // Fetch product definitions from Supabase (Secure from GitHub)
   const fetchCatalog = async () => {
     if (!supabase) return;
     try {
@@ -176,7 +219,6 @@ const App = () => {
                 PRICE: p.price
             })));
         } else {
-            // Fallback if DB is empty so site isn't broken before seeding
             setDbProducts(initialProducts.map(p => ({...p, PRICE: p.PRICE, QUANTITY: 0})));
         }
 
@@ -193,18 +235,13 @@ const App = () => {
         } else {
            setDbModels(Object.keys(initialModels));
         }
-
-        setIsDataLoaded(true);
-
-    } catch (e) {
-        console.error("Catalog Load Error", e);
-    }
+    } catch (e) { console.error(e); }
   };
 
   const fetchStock = async () => {
     if (!supabase) return;
     setIsLoadingStock(true);
-    const { data, error } = await supabase.from('inventory').select('*');
+    const { data } = await supabase.from('inventory').select('*');
     if (data) {
         const levels: Record<string, number> = {};
         data.forEach((item: any) => levels[item.product_code] = item.quantity);
@@ -223,7 +260,7 @@ const App = () => {
       if (isAdmin && adminTab === 'vouchers') fetchVouchers();
   }, [isAdmin, adminTab]);
 
-  // --- Computed Data ---
+  // --- Computed ---
   const availableVariants = useMemo(() => {
     if (!selectedModel) return [];
     const modelProducts = dbProducts.filter(p => p.MODEL === selectedModel);
@@ -256,98 +293,52 @@ const App = () => {
 
   const finalTotal = Math.max(0, subtotal + (selectedCourier ? selectedCourier.price : 0) - (appliedVoucher?.amount || 0));
 
-  // --- Admin Actions ---
-  const handleAdminLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (adminPass === 'admin123') {
-        setIsAdmin(true);
-        setShowAdminLogin(false);
-    } else {
-        alert("Incorrect password");
-    }
-  };
+  // --- Actions ---
 
-  // Seeding Function: Migrates data.ts to Supabase
   const seedDatabase = async () => {
-      if (!supabase || !confirm("This will overwrite/fill the database with initial data. Continue?")) return;
+      if (!supabase || !confirm("Overwrite DB with initial data?")) return;
       setIsSeeding(true);
       try {
-          // 1. Seed Models
-          for (const [model, make] of Object.entries(initialModels)) {
-              await supabase.from('car_models').upsert({ name: model, make }, { onConflict: 'name' });
-          }
-          // 2. Seed Images
-          for (const [key, url] of Object.entries(initialImages)) {
-              await supabase.from('product_images').upsert({ model_variant_key: key, url }, { onConflict: 'model_variant_key' });
-          }
-          // 3. Seed Products (Catalog + Inventory)
+          for (const [model, make] of Object.entries(initialModels)) await supabase.from('car_models').upsert({ name: model, make }, { onConflict: 'name' });
+          for (const [key, url] of Object.entries(initialImages)) await supabase.from('product_images').upsert({ model_variant_key: key, url }, { onConflict: 'model_variant_key' });
           for (const p of initialProducts) {
-              // Catalog
-              await supabase.from('product_catalog').upsert({
-                  code: p.CODE,
-                  model: p.MODEL,
-                  variant: p.VARIANT,
-                  position: p.POSITION,
-                  price: p.PRICE
-              }, { onConflict: 'code' });
-              
-              // Inventory (Only if not exists to preserve current stock)
+              await supabase.from('product_catalog').upsert({ code: p.CODE, model: p.MODEL, variant: p.VARIANT, position: p.POSITION, price: p.PRICE }, { onConflict: 'code' });
               const { data } = await supabase.from('inventory').select('product_code').eq('product_code', p.CODE).single();
-              if (!data) {
-                 await supabase.from('inventory').insert({ product_code: p.CODE, quantity: p.QUANTITY });
-              }
+              if (!data) await supabase.from('inventory').insert({ product_code: p.CODE, quantity: p.QUANTITY });
           }
-          alert("Database seeded successfully!");
+          alert("Seeded!");
           fetchCatalog();
           fetchStock();
-      } catch (e: any) {
-          alert("Seeding failed: " + e.message);
-      } finally {
-          setIsSeeding(false);
-      }
+      } catch (e: any) { alert(e.message); } finally { setIsSeeding(false); }
   };
 
   const updateStock = async (code: string, newQty: number) => {
-    if (!supabase) return alert("Database not connected");
-    // Admins can use direct upsert, or we can use an RPC if we want strict logging
-    const { error } = await supabase
-        .from('inventory')
-        .upsert({ product_code: code, quantity: newQty }, { onConflict: 'product_code' });
-    if (error) {
-        alert("Failed to update stock");
-    } else {
+    if (!supabase) return;
+    const { error } = await supabase.from('inventory').upsert({ product_code: code, quantity: newQty }, { onConflict: 'product_code' });
+    if (!error) {
         setStockLevels(prev => ({ ...prev, [code]: newQty }));
-        setEditingStock(prev => {
-            const next = { ...prev };
-            delete next[code];
-            return next;
-        });
+        setEditingStock(prev => { const n = { ...prev }; delete n[code]; return n; });
     }
   };
 
   const createVoucher = async () => {
-      if (!supabase) return;
-      if (!newVoucher.code || !newVoucher.amount || !newVoucher.from || !newVoucher.to) return alert("Fill all fields");
-      const { error } = await supabase.from('vouchers').insert([{
+      if (!supabase || !newVoucher.code) return;
+      await supabase.from('vouchers').insert([{
           code: newVoucher.code.toUpperCase(),
           amount: parseFloat(newVoucher.amount),
           valid_from: new Date(newVoucher.from).toISOString(),
           valid_to: new Date(newVoucher.to).toISOString()
       }]);
-      if (error) alert(error.message);
-      else {
-          setNewVoucher({ code: '', amount: '', from: '', to: '' });
-          fetchVouchers();
-      }
+      setNewVoucher({ code: '', amount: '', from: '', to: '' });
+      fetchVouchers();
   };
 
   const deleteVoucher = async (id: number) => {
-      if (!confirm("Delete voucher?")) return;
+      if (!confirm("Delete?")) return;
       await supabase?.from('vouchers').delete().eq('id', id);
       fetchVouchers();
   };
 
-  // --- Shop Handlers ---
   const addToCart = (product: Product) => {
     const currentStock = stockLevels[product.CODE] ?? 0;
     const inCart = cart.filter(c => c.CODE === product.CODE).length;
@@ -364,48 +355,22 @@ const App = () => {
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setCustomer({ ...customer, [e.target.name]: e.target.value });
-    if (e.target.name === 'postcode') {
-        setAvailableCouriers([]);
-        setSelectedCourier(null);
-    }
+    if (e.target.name === 'postcode') { setAvailableCouriers([]); setSelectedCourier(null); }
   };
 
   const applyVoucher = async () => {
       setVoucherMsg('');
-      if (!voucherInput.trim()) return;
-      if (!supabase) return setVoucherMsg("System offline");
-      const { data, error } = await supabase
-          .from('vouchers')
-          .select('*')
-          .eq('code', voucherInput.toUpperCase())
-          .eq('is_active', true)
-          .single();
-      if (error || !data) {
-          setVoucherMsg("Invalid voucher code");
-          setAppliedVoucher(null);
-          return;
-      }
-      const now = new Date();
-      const validFrom = new Date(data.valid_from);
-      const validTo = new Date(data.valid_to);
-      if (now < validFrom || now > validTo) {
-          setVoucherMsg("Voucher expired");
-          setAppliedVoucher(null);
-          return;
-      }
+      if (!voucherInput.trim() || !supabase) return;
+      const { data } = await supabase.from('vouchers').select('*').eq('code', voucherInput.toUpperCase()).eq('is_active', true).single();
+      if (!data) return setVoucherMsg("Invalid code");
+      if (new Date() < new Date(data.valid_from) || new Date() > new Date(data.valid_to)) return setVoucherMsg("Expired");
       setAppliedVoucher({ code: data.code, amount: data.amount });
-      setVoucherMsg(`Voucher applied! -RM${data.amount}`);
+      setVoucherMsg(`Applied! -RM${data.amount}`);
   };
 
-  // --- Shipping & Payment ---
   const calculateShipping = async () => {
-    if (!customer.postcode || customer.postcode.length !== 5) {
-      setErrorMsg("Please enter a valid 5-digit postcode.");
-      return;
-    }
-    if (cart.length === 0) return;
+    if (!customer.postcode || customer.postcode.length !== 5) return setErrorMsg("Invalid Postcode");
     setIsCalculatingShipping(true);
-    setErrorMsg('');
     try {
       await new Promise(r => setTimeout(r, 800)); 
       const postcodeNum = parseInt(customer.postcode);
@@ -419,32 +384,23 @@ const App = () => {
         options.push({ service_id: 'jnt_land', courier_name: 'J&T Express', service_type: 'Land', price: 8 + (totalWeight * 2), etd: '1-3 Days' });
         options.push({ service_id: 'poslaju_land', courier_name: 'Pos Laju', service_type: 'Land', price: 9 + (totalWeight * 1.8), etd: '2-4 Days' });
       }
-      options.sort((a, b) => a.price - b.price);
-      setAvailableCouriers(options);
-    } catch (err) {
-      setErrorMsg("Shipping calculation failed.");
-    } finally {
-      setIsCalculatingShipping(false);
-    }
+      setAvailableCouriers(options.sort((a, b) => a.price - b.price));
+    } catch (err) { setErrorMsg("Shipping failed."); } finally { setIsCalculatingShipping(false); }
   };
 
   const initiatePayment = async () => {
-    if (!customer.name || !customer.email || !customer.phone || !customer.address) return setErrorMsg("Fill all details.");
-    if (!selectedCourier) return setErrorMsg("Select a courier.");
-    if (hasShirtGift && !selectedShirtSize) return setErrorMsg("Please select your Free T-Shirt size.");
-
+    if (!customer.name || !customer.email || !customer.phone || !customer.address || !selectedCourier) return setErrorMsg("Missing details");
+    if (hasShirtGift && !selectedShirtSize) return setErrorMsg("Select T-Shirt Size");
     setIsProcessingPayment(true);
-    setErrorMsg('');
-
-    let orderId: number | null = null;
+    
     const gifts = ['Proride Sticker'];
     if (hasShirtGift && selectedShirtSize) gifts.push(`Proride T-Shirt (${selectedShirtSize})`);
-
+    
     try {
-      // 1. Save Order to Supabase (WITH NEW COLUMNS)
+      let orderId: number | null = null;
       if (supabase) {
-        const itemsSummary = cart.map(item => `${item.MODEL} ${item.VARIANT} - ${item.POSITION} (x${item.PRICE})`).join(', ');
-        const { data, error } = await supabase.from('orders').insert([{
+        const itemsSummary = cart.map(item => `${item.MODEL} ${item.VARIANT}`).join(', ');
+        const { data } = await supabase.from('orders').insert([{
             created_at: getMalaysiaTime(),
             customer_name: customer.name,
             customer_email: customer.email,
@@ -459,21 +415,23 @@ const App = () => {
             items_summary: itemsSummary,
             discount_amount: appliedVoucher?.amount || 0,
             voucher_code: appliedVoucher?.code || null,
-            gifts: gifts, // Correctly saving gifts array now
+            gifts: gifts,
             status: 'pending_payment'
         }]).select('id').single();
-        
-        if (error) console.error("DB Error", error);
         if (data) orderId = data.id;
       }
 
-      // 2. ToyyibPay Logic
+      // Save to localStorage for retrieval on return
+      localStorage.setItem('pendingOrder', JSON.stringify({
+          customer, cart, finalTotal, selectedCourier, appliedVoucher, gifts
+      }));
+
       if (TOYYIB_SECRET && TOYYIB_CODE) {
          const formBody = new URLSearchParams({
             userSecretKey: TOYYIB_SECRET,
             categoryCode: TOYYIB_CODE,
             billName: `Proride - Order #${orderId || 'New'}`,
-            billDescription: `Parts + Shipping (Ref: ${orderId})`,
+            billDescription: `Parts Purchase`,
             billPriceSetting: '1',
             billPayorInfo: '1',
             billAmount: (finalTotal * 100).toFixed(0),
@@ -482,38 +440,20 @@ const App = () => {
             billTo: customer.name,
             billEmail: customer.email,
             billPhone: customer.phone,
-            billSplitPayment: '0',
-            billSplitPaymentArgs: '',
-            billPaymentChannel: '0',
-            billContentEmail: 'Thank you for your purchase!',
             billChargeToCustomer: '1'
          });
-         try {
-             const response = await fetch('https://toyyibpay.com/index.php/api/createBill', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: formBody
-             });
-             const result = await response.json();
-             if (result && result[0]?.BillCode) {
-                 window.location.href = `https://toyyibpay.com/${result[0].BillCode}`;
-                 return;
-             } else {
-                 throw new Error("ToyyibPay Error");
-             }
-         } catch (e) {
-             console.error(e);
-             alert("Direct API call blocked. Showing simulator.");
-             setShowPaymentModal(true); 
-         }
+         const response = await fetch('https://toyyibpay.com/index.php/api/createBill', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: formBody
+         });
+         const result = await response.json();
+         if (result[0]?.BillCode) window.location.href = `https://toyyibpay.com/${result[0].BillCode}`;
+         else throw new Error("Payment Error");
       } else {
         setShowPaymentModal(true); 
       }
-    } catch (err) {
-      setErrorMsg("Payment processing failed.");
-    } finally {
-      setIsProcessingPayment(false);
-    }
+    } catch (err) { setErrorMsg("Payment Error"); setIsProcessingPayment(false); }
   };
 
   const finalizeMockPayment = async (success: boolean) => {
@@ -522,26 +462,31 @@ const App = () => {
       const gifts = ['Proride Sticker'];
       if (hasShirtGift && selectedShirtSize) gifts.push(`Proride T-Shirt (${selectedShirtSize})`);
       
-      setOrderSuccess({
-        billCode: 'TP-MOCK-' + Math.floor(Math.random() * 100000),
+      const mockOrder: OrderReceipt = {
+        billCode: 'MOCK-' + Math.floor(Math.random() * 100000),
+        transactionId: 'TXN-' + Date.now(),
+        date: new Date().toLocaleString(),
+        customer: { ...customer },
         items: [...cart],
+        shipping: {
+            courier_name: selectedCourier.courier_name,
+            price: selectedCourier.price,
+            service_type: selectedCourier.service_type
+        },
+        appliedVoucher: appliedVoucher,
         amount: finalTotal,
         discount: appliedVoucher?.amount || 0,
         gifts: gifts
-      });
+      };
+
+      setOrderSuccess(mockOrder);
+      localStorage.removeItem('pendingOrder');
       
-      // Secure Stock Update via RPC
       if (supabase) {
-          for (const item of cart) {
-              await supabase.rpc('decrement_stock', { p_code: item.CODE, qty: 1 });
-          }
-          if (hasShirtGift && selectedShirtSize) {
-              await supabase.rpc('decrement_stock', { p_code: `GIFT-SHIRT-${selectedShirtSize}`, qty: 1 });
-          }
-          // Refresh local view
+          for (const item of cart) await supabase.rpc('decrement_stock', { p_code: item.CODE, qty: 1 });
+          if (hasShirtGift && selectedShirtSize) await supabase.rpc('decrement_stock', { p_code: `GIFT-SHIRT-${selectedShirtSize}`, qty: 1 });
           fetchStock();
       }
-      
       setCart([]);
       setAppliedVoucher(null);
       setVoucherInput('');
@@ -560,28 +505,145 @@ const App = () => {
     setVoucherInput('');
     setSelectedShirtSize('');
     fetchStock();
+    window.history.replaceState({}, document.title, window.location.pathname);
   }
 
-  // --- Views ---
+  const handleAdminLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (adminPass === 'admin123') {
+        setIsAdmin(true);
+        setShowAdminLogin(false);
+        setAdminPass('');
+    } else {
+        alert("Invalid Password (try 'admin123')");
+    }
+  };
 
+  // --- Detailed Receipt View ---
   if (orderSuccess) return (
-      <div className="min-h-screen bg-gray-50 p-8 font-sans flex items-center justify-center">
-        <div className="max-w-xl w-full bg-white rounded-xl shadow-lg border border-gray-100 p-8 text-center">
-             <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6 text-green-600">
-                <Check className="w-10 h-10" />
-             </div>
-             <h1 className="text-3xl font-bold text-gray-900 mb-2">Order Successful</h1>
-             <p className="text-gray-500 mb-8">Ref: {orderSuccess.billCode}</p>
-             <div className="bg-gray-50 p-4 rounded text-left text-sm mb-6">
-                 <div className="font-bold mb-2">Includes:</div>
-                 {orderSuccess.items.map(i => <div key={i.cartId}>• {i.MODEL} {i.VARIANT}</div>)}
-                 {orderSuccess.gifts.map(g => <div key={g} className="text-green-600">• {g} (FREE)</div>)}
-                 {orderSuccess.discount > 0 && <div className="mt-2 text-blue-600 font-bold">Discount: -RM {orderSuccess.discount.toFixed(2)}</div>}
-             </div>
-             <button onClick={resetShop} className="w-full bg-blue-900 text-white py-3 rounded-xl font-bold hover:bg-blue-800">
-                Back to Store
-             </button>
+      <div className="min-h-screen bg-gray-100 p-4 md:p-8 font-sans flex flex-col items-center">
+        <div className="max-w-2xl w-full bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden printable-receipt relative">
+            
+            {/* Receipt Header */}
+            <div className="bg-blue-900 text-white p-8 text-center no-print-bg">
+                <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-4 backdrop-blur-sm">
+                    <Check className="w-8 h-8 text-white" />
+                </div>
+                <h1 className="text-2xl font-bold mb-1">Payment Successful</h1>
+                <p className="opacity-80 text-sm">Thank you for your order!</p>
+            </div>
+
+            <div className="p-8">
+                {/* Reference Info */}
+                <div className="flex justify-between items-start border-b pb-6 mb-6">
+                    <div>
+                        <p className="text-xs text-gray-400 uppercase font-bold tracking-wider">Bill To</p>
+                        <h3 className="font-bold text-gray-900 mt-1">{orderSuccess.customer.name}</h3>
+                        <p className="text-sm text-gray-500">{orderSuccess.customer.address}</p>
+                        <p className="text-sm text-gray-500">{orderSuccess.customer.postcode}</p>
+                        <div className="mt-2 text-sm text-gray-600 space-y-1">
+                            <div className="flex items-center gap-2"><Phone className="w-3 h-3"/> {orderSuccess.customer.phone}</div>
+                            <div className="flex items-center gap-2"><Mail className="w-3 h-3"/> {orderSuccess.customer.email}</div>
+                        </div>
+                    </div>
+                    <div className="text-right">
+                        <div className="mb-2">
+                            <p className="text-xs text-gray-400 uppercase font-bold tracking-wider">Order Ref</p>
+                            <p className="font-mono font-bold text-gray-800">{orderSuccess.billCode}</p>
+                        </div>
+                        <div>
+                            <p className="text-xs text-gray-400 uppercase font-bold tracking-wider">Date</p>
+                            <p className="text-sm text-gray-600">{orderSuccess.date}</p>
+                        </div>
+                        {orderSuccess.transactionId && (
+                            <div className="mt-2">
+                                <p className="text-xs text-gray-400 uppercase font-bold tracking-wider">Transaction ID</p>
+                                <p className="text-xs font-mono text-gray-600">{orderSuccess.transactionId}</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Items Table */}
+                <div className="mb-6">
+                    <p className="text-xs text-gray-400 uppercase font-bold tracking-wider mb-3">Order Details</p>
+                    <div className="bg-gray-50 rounded-lg overflow-hidden border">
+                        <table className="w-full text-sm">
+                            <thead className="bg-gray-100 border-b">
+                                <tr>
+                                    <th className="text-left p-3 text-gray-600 font-medium">Item</th>
+                                    <th className="text-right p-3 text-gray-600 font-medium">Price</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y">
+                                {orderSuccess.items.map((item) => (
+                                    <tr key={item.cartId}>
+                                        <td className="p-3">
+                                            <div className="font-bold text-gray-800">{item.MODEL}</div>
+                                            <div className="text-xs text-gray-500">{item.VARIANT} - {item.POSITION}</div>
+                                        </td>
+                                        <td className="p-3 text-right font-medium">RM {item.PRICE.toFixed(2)}</td>
+                                    </tr>
+                                ))}
+                                {/* Gifts Row */}
+                                {orderSuccess.gifts.map((gift, idx) => (
+                                    <tr key={idx} className="bg-green-50/50">
+                                        <td className="p-3 flex items-center gap-2 text-green-700">
+                                            <Gift className="w-4 h-4" /> {gift}
+                                        </td>
+                                        <td className="p-3 text-right font-bold text-green-700">FREE</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                {/* Totals */}
+                <div className="space-y-2 border-t pt-4">
+                    <div className="flex justify-between text-sm text-gray-600">
+                        <span>Subtotal</span>
+                        <span>RM {orderSuccess.items.reduce((a, b) => a + b.PRICE, 0).toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between text-sm text-gray-600">
+                        <span>Shipping ({orderSuccess.shipping.courier_name} - {orderSuccess.shipping.service_type})</span>
+                        <span>RM {orderSuccess.shipping.price.toFixed(2)}</span>
+                    </div>
+                    {orderSuccess.discount > 0 && (
+                         <div className="flex justify-between text-sm text-green-600">
+                            <span>Voucher ({orderSuccess.appliedVoucher?.code})</span>
+                            <span>-RM {orderSuccess.discount.toFixed(2)}</span>
+                        </div>
+                    )}
+                    <div className="flex justify-between items-center pt-3 border-t mt-2">
+                        <span className="font-bold text-lg text-gray-900">Total Paid</span>
+                        <span className="font-bold text-xl text-blue-900">RM {orderSuccess.amount.toFixed(2)}</span>
+                    </div>
+                </div>
+            </div>
+
+            {/* Receipt Footer Actions (No Print) */}
+            <div className="bg-gray-50 p-6 flex flex-col sm:flex-row gap-3 border-t no-print">
+                <button onClick={() => window.print()} className="flex-1 bg-white border border-gray-300 text-gray-700 py-3 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-gray-50 shadow-sm">
+                    <Printer className="w-5 h-5"/> Print Receipt
+                </button>
+                <button onClick={() => { 
+                    setOrderSuccess(null); 
+                    setIsCheckout(false); 
+                    // Clear cart for new order but keep user on page
+                    setCart([]); setAppliedVoucher(null); setCustomer({ name: '', email: '', phone: '', address: '', postcode: '' }); 
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                }} className="flex-1 bg-white border border-gray-300 text-gray-700 py-3 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-gray-50 shadow-sm">
+                    <ShoppingBag className="w-5 h-5"/> Continue Shopping
+                </button>
+                <button onClick={resetShop} className="flex-1 bg-blue-900 text-white py-3 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-blue-800 shadow-md">
+                    <Home className="w-5 h-5"/> Homepage
+                </button>
+            </div>
         </div>
+        <p className="text-gray-400 text-xs mt-6 mb-10 text-center max-w-md no-print">
+            Please save a copy of this receipt for your records. An email confirmation has been sent to {orderSuccess.customer.email}.
+        </p>
       </div>
   );
 
@@ -791,9 +853,8 @@ const App = () => {
         )}
       </main>
       
-      {/* Sticky Bottom Checkout Bar (Visible when not checking out) */}
       {cart.length > 0 && !isCheckout && (
-          <div className="fixed bottom-0 left-0 right-0 bg-white border-t p-4 shadow-lg z-50 flex justify-between items-center animate-slide-up">
+          <div className="fixed bottom-0 left-0 right-0 bg-white border-t p-4 shadow-lg z-50 flex justify-between items-center animate-slide-up no-print">
               <div className="flex flex-col">
                   <div className="text-xs text-gray-500 font-medium uppercase tracking-wide">{cart.length} Items in Cart</div>
                   <div className="font-bold text-xl text-blue-900">RM {subtotal.toFixed(2)}</div>
@@ -804,7 +865,7 @@ const App = () => {
           </div>
       )}
 
-      <footer className="bg-white border-t py-8 mt-12 mb-20">
+      <footer className="bg-white border-t py-8 mt-12 mb-20 no-print">
           <div className="max-w-5xl mx-auto px-4 text-center">
               <p className="text-gray-400 text-sm mb-2">&copy; 2024 Proride Parts Store. All rights reserved.</p>
               <div className="text-gray-300 text-xs font-mono mb-4 flex items-center justify-center gap-1"><Lock className="w-3 h-3"/> System Locked: 09 Dec 2025, 10:12PM</div>
@@ -936,6 +997,18 @@ const App = () => {
                  </div>
              )}
           </div>
+      )}
+      
+      {/* Mock Payment Modal */}
+      {showPaymentModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
+            <div className="bg-white p-6 rounded-xl shadow-xl max-w-sm w-full">
+                <h3 className="font-bold text-lg mb-2">Payment Simulator</h3>
+                <p className="text-sm text-gray-500 mb-4">ToyyibPay keys missing or API blocked.</p>
+                <button onClick={() => finalizeMockPayment(true)} className="w-full bg-green-600 text-white py-2 rounded mb-2">Simulate Success</button>
+                <button onClick={() => finalizeMockPayment(false)} className="w-full border py-2 rounded">Cancel</button>
+            </div>
+        </div>
       )}
     </div>
   );
