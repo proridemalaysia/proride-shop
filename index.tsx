@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ShoppingCart, Check, X, Loader2, Package, AlertCircle, Database, Lock, LogIn, Save, RefreshCw, Gift, Trash2, UploadCloud } from 'lucide-react';
+import { ShoppingCart, Check, X, Loader2, Package, AlertCircle, Database, Lock, LogIn, Save, RefreshCw, Gift, Trash2, UploadCloud, ArrowRight } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 // We import data only for the initial seeding process. 
 // Once seeded, the app relies on Supabase.
@@ -586,7 +586,7 @@ const App = () => {
   );
 
   return (
-    <div className="min-h-screen bg-gray-50 text-slate-800 font-sans pb-20">
+    <div className="min-h-screen bg-gray-50 text-slate-800 font-sans pb-32 relative">
       <header className="bg-white shadow-sm sticky top-0 z-40">
         <div className="max-w-5xl mx-auto px-4 py-4 flex justify-between items-center">
           <div className="flex items-center gap-2">
@@ -791,7 +791,20 @@ const App = () => {
         )}
       </main>
       
-      <footer className="bg-white border-t py-8 mt-12">
+      {/* Sticky Bottom Checkout Bar (Visible when not checking out) */}
+      {cart.length > 0 && !isCheckout && (
+          <div className="fixed bottom-0 left-0 right-0 bg-white border-t p-4 shadow-lg z-50 flex justify-between items-center animate-slide-up">
+              <div className="flex flex-col">
+                  <div className="text-xs text-gray-500 font-medium uppercase tracking-wide">{cart.length} Items in Cart</div>
+                  <div className="font-bold text-xl text-blue-900">RM {subtotal.toFixed(2)}</div>
+              </div>
+              <button onClick={() => setIsCheckout(true)} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-blue-700 shadow-md flex items-center gap-2 transition-transform hover:scale-105 active:scale-95">
+                  Checkout <ArrowRight className="w-5 h-5" />
+              </button>
+          </div>
+      )}
+
+      <footer className="bg-white border-t py-8 mt-12 mb-20">
           <div className="max-w-5xl mx-auto px-4 text-center">
               <p className="text-gray-400 text-sm mb-2">&copy; 2024 Proride Parts Store. All rights reserved.</p>
               <div className="text-gray-300 text-xs font-mono mb-4 flex items-center justify-center gap-1"><Lock className="w-3 h-3"/> System Locked: 09 Dec 2025, 10:12PM</div>
