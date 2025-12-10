@@ -4,7 +4,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Proride Performance Parts Store</title>
+    <title>Proride Parts Store</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
@@ -35,6 +35,32 @@
       .animate-slide-up {
         animation: slideIn 0.3s ease-out forwards;
       }
+
+      /* Print Styles */
+      @media print {
+        @page { margin: 0; size: auto; }
+        body * {
+          visibility: hidden;
+        }
+        .printable-receipt, .printable-receipt * {
+          visibility: visible;
+        }
+        .printable-receipt {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 100%;
+          margin: 0;
+          padding: 20px;
+          background: white;
+          color: black;
+          border: none;
+          box-shadow: none;
+        }
+        .no-print {
+          display: none !important;
+        }
+      }
     </style>
   <script type="importmap">
 {
@@ -55,4 +81,3 @@
     <script type="module" src="/index.tsx"></script>
   </body>
 </html>
-
