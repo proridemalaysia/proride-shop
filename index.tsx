@@ -652,7 +652,7 @@ const App = () => {
       <header className="bg-white shadow-sm sticky top-0 z-40">
         <div className="max-w-5xl mx-auto px-4 py-4 flex justify-between items-center">
           <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-bold text-blue-900 tracking-tight cursor-pointer" onClick={resetShop}>Proride Parts</h1>
+              <h1 className="text-2xl font-bold text-blue-900 tracking-tight cursor-pointer" onClick={resetShop}>Proride Parts Store</h1>
               {isAdmin && <span className="bg-red-100 text-red-600 text-xs px-2 py-1 rounded-full font-bold border border-red-200">ADMIN</span>}
           </div>
           <button onClick={() => setIsCartOpen(true)} className="relative p-2 text-gray-600 hover:text-blue-600">
@@ -1016,3 +1016,4 @@ const App = () => {
 
 const root = createRoot(document.getElementById('root')!);
 root.render(<App />);
+
